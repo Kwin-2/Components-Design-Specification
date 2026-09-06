@@ -1,0 +1,7 @@
+# 明文数据与 Word 文档不进公开仓库（数据以 data/bundle.json 密文发布）
+data/docs/
+data/parts.json
+data/surface.json
+word-docs/
+*.log
+.DS_Store

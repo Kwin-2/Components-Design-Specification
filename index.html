@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>懋略设计规则库 · 电池包零部件设计规范</title>
+<meta name="description" content="懋略电池系统设计部 · 电池包零部件设计规范在线自查库（内部资料，需访问令牌）">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<!-- 访问令牌门禁 -->
+<div class="lock" id="lock">
+  <div class="lock-card" id="lockCard">
+    <div class="lock-brand"><div class="brand-mark">懋</div><div>懋略设计规则库</div></div>
+    <div class="lock-sub">电池包零部件设计规范 · 内部资料</div>
+    <div class="lock-hint">本页面内容受访问令牌保护，请输入令牌后进入</div>
+    <input type="password" id="lockInput" placeholder="请输入访问令牌" autocomplete="off" spellcheck="false">
+    <button id="lockBtn" onclick="unlock()">进入</button>
+    <div class="lock-err" id="lockErr"></div>
+    <div class="lock-foot">未授权访问禁止使用、复制或抓取本页面数据</div>
+  </div>
+</div>
+<noscript><div style="padding:40px;text-align:center;font-family:sans-serif">本页面需要启用 JavaScript 并输入访问令牌。</div></noscript>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-mark">懋</div>
+      <div class="brand-text">
+        <div class="brand-name">懋略设计规则库</div>
+        <div class="brand-sub">电池包零部件设计规范</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <a class="nav-item" href="#/home" data-view="home"><span class="ico">⌂</span>首页总览</a>
+      <div class="nav-group-title">按制造工艺</div>
+      <div id="nav-process"></div>
+      <div class="nav-group-title">工具</div>
+      <a class="nav-item" href="#/parts" data-view="parts"><span class="ico">🔩</span>零件检索</a>
+      <a class="nav-item" href="#/surface" data-view="surface"><span class="ico">🛡</span>表面处理选型</a>
+      <a class="nav-item" href="#/checklist" data-view="checklist"><span class="ico">☑</span>在线自查清单</a>
+      <a class="nav-item" href="#/about" data-view="about"><span class="ico">ℹ</span>使用说明</a>
+    </nav>
+    <div class="sidebar-foot">
+      <div>版本 A/0 · 首版试行</div>
+      <div>懋略 · 电池系统设计部</div>
+    </div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <button class="menu-btn" id="menuBtn" aria-label="菜单">☰</button>
+      <div class="search-wrap">
+        <input id="searchInput" type="search" placeholder="搜索规范、零件、规则关键词…（如：折弯半径 / 爬电距离 / NTC / 镀锌镍）" autocomplete="off">
+        <div class="search-results" id="searchResults"></div>
+      </div>
+      <a class="topbar-link" href="#/checklist" title="在线自查">☑ 自查</a>
+    </header>
+    <main class="content" id="content"></main>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script src="assets/app.js"></script>
+</body>
+</html>
