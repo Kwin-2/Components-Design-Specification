@@ -2,9 +2,12 @@
 'use strict';
 
 const DATA = {
-  docs: {},      // id -> doc json
+  docs: {},      // id -> 已解密的规范全文（按需缓存）
+  meta: null,    // { docsIndex, parts, surface, change }
   parts: [],     // parts.json
   surface: null, // surface.json
+  change: null,  // change.json
+  techspec: {},  // id -> 已解密的技术要求（按需缓存）
 };
 const CAT_LABELS = {
   '结构件': ['sheet-metal', 'extrusion', 'die-casting', 'injection', 'machining-busbar', 'endplate-tiebar'],
@@ -30,7 +33,71 @@ function toast(msg) {
   t._h = setTimeout(() => t.classList.remove('show'), 1800);
 }
 
-/* ---------------- 访问令牌解锁与数据解密 ---------------- */
+/* ---------------- 访问令牌解锁与数据解密（分片按需版） ---------------- */
+let masterKey = null;   // 解锁后持有的 AES 密钥（用于按需解密各分片）
+const SESS_META = 'ml_meta_ct';     // sessionStorage：元数据包密文缓存（刷新后免重复下载，仍需令牌校验）
+
+function bytesFromB64(s) { return Uint8Array.from(atob(s), c => c.charCodeAt(0)); }
+
+async function fetchWithTimeout(url, ms) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    const r = await fetch(url, { cache: 'no-store', signal: ctl.signal });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.text();
+  } finally { clearTimeout(timer); }
+}
+
+async function deriveKey(pass, meta) {
+  const baseKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: bytesFromB64(meta.salt), iterations: meta.iter, hash: 'SHA-256' }, baseKey, 256);
+  return crypto.subtle.importKey('raw', bits, 'AES-GCM', false, ['decrypt']);
+}
+
+async function decryptText(text, key, expectMarker) {
+  const b = JSON.parse(text);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytesFromB64(b.iv) }, key, bytesFromB64(b.data));
+  const obj = JSON.parse(new TextDecoder().decode(pt));
+  if (expectMarker && obj.marker !== expectMarker) throw new Error('BAD MARKER');
+  return obj;
+}
+
+/* 按需下载+解密单个分片（带缓存；GCM认证标签保证完整性，错误密钥必然解密失败） */
+const chunkCache = new Map();
+async function fetchChunk(name) {
+  if (chunkCache.has(name)) return chunkCache.get(name);
+  let text = null;
+  try { text = sessionStorage.getItem('ml_' + name); } catch (e) {}
+  if (!text) {
+    text = await fetchWithTimeout('data/enc/' + name + '.json.enc', 45000);
+    try { sessionStorage.setItem('ml_' + name, text); } catch (e) {}
+  }
+  const obj = await decryptText(text, masterKey, null);
+  chunkCache.set(name, obj);
+  return obj;
+}
+
+async function getDoc(id) {
+  if (DATA.docs[id]) return DATA.docs[id];
+  const obj = await fetchChunk('doc-' + id);
+  DATA.docs[id] = obj;
+  return obj;
+}
+
+async function getTechspec(id) {
+  if (DATA.techspec[id]) return DATA.techspec[id];
+  const obj = await fetchChunk('techspec-' + id);
+  DATA.techspec[id] = obj;
+  return obj;
+}
+
+let searchPromise = null;
+function getSearchIndex() {
+  if (!searchPromise) searchPromise = fetchChunk('search').then(o => o || []).catch(() => []);
+  return searchPromise;
+}
+
 async function unlock() {
   const input = document.getElementById('lockInput');
   const btn = document.getElementById('lockBtn');
@@ -41,35 +108,32 @@ async function unlock() {
   btn.textContent = '验证中…';
   err.textContent = '';
   try {
-    const r = await fetch('data/bundle.json', { cache: 'no-store' });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const b = await r.json();
-    const bytes = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
-    const salt = bytes(b.salt);
-    const iv = bytes(b.iv);
-    const baseKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveBits']);
-    const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: b.iter, hash: 'SHA-256' }, baseKey, 256);
-    const key = await crypto.subtle.importKey('raw', bits, 'AES-GCM', false, ['decrypt']);
-    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, bytes(b.data));
-    const payload = JSON.parse(new TextDecoder().decode(pt));
-    if (payload.marker !== 'MORLUS-LOCK-V1') throw new Error('BAD MARKER');
-    DATA.docs = payload.docs || {};
-    DATA.techspec = payload.techspec || {};
-    DATA.parts = (payload.parts && payload.parts.parts) || [];
-    DATA.surface = payload.surface;
-    DATA.change = payload.change;
+    let text = null;
+    try { text = sessionStorage.getItem(SESS_META); } catch (e) {}
+    if (!text) {
+      btn.textContent = '正在下载…';
+      text = await fetchWithTimeout('data/enc/meta.json.enc', 30000);
+      try { sessionStorage.setItem(SESS_META, text); } catch (e) {}
+    }
+    btn.textContent = '正在解密…';
+    const b0 = JSON.parse(text);
+    masterKey = await deriveKey(pass, b0);
+    const meta = await decryptText(text, masterKey, 'MORLUS-LOCK-V1');
+    DATA.meta = meta;
+    DATA.parts = (meta.parts && meta.parts.parts) || [];
+    DATA.surface = meta.surface;
+    DATA.change = meta.change;
     document.getElementById('lock').classList.add('hide');
     input.value = '';
     renderNav();
     route();
   } catch (e) {
-    err.textContent = '令牌不正确，或数据无法解密，请重试';
+    err.textContent = (e && e.message === 'AbortError' || (e && e.name === 'AbortError'))
+      ? '数据下载超时，请检查网络后重试（可刷新页面或多点几次进入）'
+      : '令牌不正确，或数据无法解密，请重试';
     const card = document.getElementById('lockCard');
-    if (card) {
-      card.classList.remove('shake');
-      void card.offsetWidth;
-      card.classList.add('shake');
-    }
+    if (card) { card.classList.remove('shake'); void card.offsetWidth; card.classList.add('shake'); }
+  } finally {
     btn.disabled = false;
     btn.textContent = '进入';
   }
@@ -83,12 +147,13 @@ function lockInputKey(e) {
 function renderNav() {
   const box = $('#nav-process');
   const order = Object.keys(CAT_LABELS);
+  const idx = (DATA.meta && DATA.meta.docsIndex) || {};
   box.innerHTML = order.map(cat => {
-    const ids = CAT_LABELS[cat].filter(id => DATA.docs[id]);
+    const ids = CAT_LABELS[cat].filter(id => idx[id]);
     if (!ids.length) return '';
     return `<div class="nav-group" data-cat="${cat}">
       ${ids.map(id => {
-        const d = DATA.docs[id];
+        const d = idx[id];
         return `<a class="nav-item" href="#/doc/${id}" data-view="doc" data-id="${id}">
           <span class="ico">${CAT_ICONS[cat]}</span>${esc(d ? d.title.replace('设计规范', '').replace('选用规范', '') : id)}</a>`;
       }).join('')}
@@ -96,7 +161,7 @@ function renderNav() {
   }).join('');
   // 展开当前分类
   const cur = location.hash.match(/#\/doc\/([a-z-]+)/);
-  if (cur && DATA.docs[cur[1]]) {
+  if (cur && idx[cur[1]]) {
     const cat = Object.keys(CAT_LABELS).find(c => CAT_LABELS[c].includes(cur[1]));
     if (cat) {
       const g = box.querySelector(`[data-cat="${cat}"]`);
@@ -144,9 +209,10 @@ function route() {
 
 /* ---------------- 首页 ---------------- */
 function renderHome(c) {
-  const docs = Object.values(DATA.docs);
-  const ruleCount = docs.reduce((n, d) => n + (d.blocks || []).filter(b => b.type === 'rule').length, 0);
-  const checkCount = docs.reduce((n, d) => n + (d.blocks || []).filter(b => b.type === 'checklist').reduce((m, cb) => m + (cb.items || []).length, 0), 0);
+  const idx = (DATA.meta && DATA.meta.docsIndex) || {};
+  const entries = Object.values(idx);
+  const ruleCount = entries.reduce((n, d) => n + (d.ruleCount || 0), 0);
+  const checkCount = entries.reduce((n, d) => n + (d.checkCount || 0), 0);
   const groups = {};
   DATA.parts.forEach(p => { (groups[p.group] = groups[p.group] || []).push(p); });
 
@@ -156,7 +222,7 @@ function renderHome(c) {
       <div class="page-desc">按制造工艺与零件类型分类的设计规范集 —— 设计阶段查阅、图纸下发前自查，减少 DFM 问题与反复改图。</div>
     </div>
     <div class="stat-row">
-      <div class="stat"><div class="num">${docs.length}</div><div class="lbl">份设计规范</div></div>
+      <div class="stat"><div class="num">${entries.length}</div><div class="lbl">份设计规范</div></div>
       <div class="stat"><div class="num">${ruleCount}</div><div class="lbl">条设计规则</div></div>
       <div class="stat"><div class="num">${DATA.parts.length}</div><div class="lbl">个零件类型</div></div>
       <div class="stat"><div class="num">${checkCount}</div><div class="lbl">项自查条目</div></div>
@@ -177,12 +243,12 @@ function renderHome(c) {
       <a class="btn ghost" href="#/checklist" style="margin-left:8px">图纸下发前自查 →</a></div>
     </div>
 
-    <div class="sec-title"><span class="bar"></span>按制造工艺分类（${docs.length} 份规范）</div>
+    <div class="sec-title"><span class="bar"></span>按制造工艺分类（${entries.length} 份规范）</div>
     <div class="grid cols-2">
       ${Object.keys(CAT_LABELS).map(cat => {
-        const ids = CAT_LABELS[cat].filter(id => DATA.docs[id]);
+        const ids = CAT_LABELS[cat].filter(id => idx[id]);
         return ids.map(id => {
-          const d = DATA.docs[id];
+          const d = idx[id];
           return `<a class="doc-card" href="#/doc/${id}">
             <div class="dc-no">${esc(d.doc_no)} · ${CAT_ICONS[cat]} ${cat}</div>
             <div class="dc-title">${esc(d.title)}</div>
@@ -214,15 +280,22 @@ function partCard(p) {
 }
 
 function docShort(id) {
-  const d = DATA.docs[id];
+  const idx = (DATA.meta && DATA.meta.docsIndex) || {};
+  const d = idx[id];
   if (!d) return id;
   return d.title.replace('设计规范', '').replace('选用规范', '').replace('与防腐设计规范', '').replace('与导热材料', '');
 }
 
 /* ---------------- 文档页 ---------------- */
-function renderDoc(c, id) {
-  const d = DATA.docs[id];
-  if (!d) { c.innerHTML = `<div class="empty">未找到规范 ${esc(id)}（内容文件缺失）</div>`; return; }
+async function renderDoc(c, id) {
+  const idx = (DATA.meta && DATA.meta.docsIndex) || {};
+  if (!idx[id]) { c.innerHTML = `<div class="empty">未找到规范 ${esc(id)}</div>`; return; }
+  c.innerHTML = `<div class="empty">正在加载规范内容…</div>`;
+  let d;
+  try { d = await getDoc(id); } catch (e) {
+    c.innerHTML = `<div class="empty">规范内容加载失败，请检查网络后刷新重试。</div>`;
+    return;
+  }
   const cat = Object.keys(CAT_LABELS).find(k => CAT_LABELS[k].includes(id));
   const ruleN = (d.blocks || []).filter(b => b.type === 'rule').length;
   const mustN = (d.blocks || []).filter(b => b.type === 'rule' && b.level === '强制').length;
@@ -400,13 +473,12 @@ function renderParts(c, name) {
       <div class="doc-tabs">${p.docs.map(id => `<a href="#/doc/${id}">${esc(docShort(id))}</a>`).join('')}</div>
       <div class="grid cols-2">
       ${p.docs.map(id => {
-        const d = DATA.docs[id];
+        const d = (DATA.meta && DATA.meta.docsIndex) ? DATA.meta.docsIndex[id] : null;
         if (!d) return '';
-        const must = (d.blocks || []).filter(b => b.type === 'rule' && b.level === '强制').length;
         return `<a class="doc-card" href="#/doc/${id}">
           <div class="dc-no">${esc(d.doc_no)}</div>
           <div class="dc-title">${esc(d.title)}</div>
-          <div class="dc-sub">${must} 条强制规则 · ${(d.blocks || []).filter(b => b.type === 'rule').length} 条规则 · 附自查清单</div>
+          <div class="dc-sub">${d.ruleCount} 条规则 · ${d.checkCount} 项自查</div>
         </a>`;
       }).join('')}
       </div>
@@ -550,7 +622,7 @@ function runSelector() {
 /* ---------------- 自查清单聚合页 ---------------- */
 function renderChecklist(c, id) {
   if (id) { renderDocChecklistOnly(c, id); return; }
-  const docs = Object.values(DATA.docs).filter(d => (d.blocks || []).some(b => b.type === 'checklist'));
+  const idx = (DATA.meta && DATA.meta.docsIndex) || {};
   c.innerHTML = `
     <div class="page-head">
       <div class="page-title">在线自查清单</div>
@@ -558,7 +630,7 @@ function renderChecklist(c, id) {
     </div>
     <div class="grid cols-2">
       ${DATA.parts.map(p => {
-        const ids = p.docs.filter(id => DATA.docs[id] && (DATA.docs[id].blocks || []).some(b => b.type === 'checklist'));
+        const ids = p.docs.filter(id => idx[id] && idx[id].checkCount > 0);
         if (!ids.length) return '';
         return `<a class="doc-card" href="#/checklist/${ids[0]}">
           <div class="dc-title">${esc(p.name)}</div>
@@ -569,9 +641,13 @@ function renderChecklist(c, id) {
   `;
 }
 
-function renderDocChecklistOnly(c, id) {
-  const d = DATA.docs[id];
-  if (!d) { c.innerHTML = `<div class="empty">未找到规范</div>`; return; }
+async function renderDocChecklistOnly(c, id) {
+  c.innerHTML = `<div class="empty">正在加载自查清单…</div>`;
+  let d;
+  try { d = await getDoc(id); } catch (e) {
+    c.innerHTML = `<div class="empty">自查清单加载失败，请检查网络后刷新重试。</div>`;
+    return;
+  }
   c.innerHTML = `
     <div class="crumb"><a href="#/home">首页</a> / <a href="#/checklist">自查清单</a> / ${esc(d.title)}</div>
     <div class="page-head"><div class="page-title">☑ ${esc(d.title)} · 自查清单</div>
@@ -581,39 +657,19 @@ function renderDocChecklistOnly(c, id) {
   updateCkBar(id);
 }
 
-/* ---------------- 搜索 ---------------- */
+/* ---------------- 搜索（索引懒加载） ---------------- */
 let searchIndex = null;
-function buildIndex() {
+async function buildIndex() {
   if (searchIndex) return searchIndex;
-  searchIndex = [];
-  const add = (d, type, text, anchor, title) => {
-    if (!text) return;
-    searchIndex.push({ type, text: String(text), doc: d.id, docTitle: d.title, docNo: d.doc_no, anchor, title });
-  };
-  Object.values(DATA.docs).forEach(d => {
-    add(d, 'doc', d.title + ' ' + d.subtitle, '', d.title);
-    (d.applies_to || []).forEach(a => add(d, 'doc', a, '', d.title));
-    (d.blocks || []).forEach(b => {
-      if (b.type === 'rule') add(d, 'rule', b.id + ' ' + b.title + ' ' + b.spec + ' ' + b.text + ' ' + b.wrong + ' ' + b.right, 'rule-' + b.id, b.title);
-      else if (b.type === 'table') add(d, 'table', b.caption + ' ' + b.header.join(' ') + ' ' + (b.rows || []).flat().join(' '), '', b.caption);
-      else if (b.type === 'p') add(d, 'p', b.text, '', b.text.slice(0, 40));
-      else if (b.type === 'h1' || b.type === 'h2') add(d, 'h', b.title, '', b.title);
-      else if (b.type === 'checklist') add(d, 'ck', (b.items || []).join(' '), '', b.title);
-    });
-    (d.mistakes || []).forEach(m => add(d, 'mistake', m, '', '常见错误'));
-  });
-  DATA.parts.forEach(p => {
-    if (!p || !p.name) return;
-    searchIndex.push({ type: 'part', text: p.name + ' ' + (p.note || '') + ' ' + (p.docs || []).join(' '), doc: 'overview', docTitle: '总览与使用指南', docNo: 'ML-DR-00', anchor: '', title: p.name });
-  });
-  return searchIndex;
+  searchIndex = await getSearchIndex();
+  return searchIndex || [];
 }
 
-function doSearch(q) {
+async function doSearch(q) {
   q = q.trim();
   const box = $('#searchResults');
   if (!q) { box.classList.remove('open'); box.innerHTML = ''; return; }
-  const idx = buildIndex();
+  const idx = await buildIndex();
   const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
   const scored = idx.map(ent => {
     const t = ent.text.toLowerCase();
@@ -643,8 +699,9 @@ function doSearch(q) {
   box.classList.add('open');
 }
 
-function renderSearch(c, q) {
-  const idx = buildIndex();
+async function renderSearch(c, q) {
+  c.innerHTML = `<div class="empty">正在搜索…</div>`;
+  const idx = await buildIndex();
   const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
   const hits = idx.filter(ent => terms.every(tm => ent.text.toLowerCase().includes(tm)))
     .sort((a, b) => (b.type === 'rule' ? 1 : 0) - (a.type === 'rule' ? 1 : 0)).slice(0, 60);
@@ -785,9 +842,10 @@ function copyChg() {
 
 /* ---------------- 技术要求生成器 ---------------- */
 let techState = { env: 'p3', supplier: true };
-function renderTechspec(c, id) {
-  const list = Object.values(DATA.techspec || {}).sort((a, b) => a.doc_no.localeCompare(b.doc_no));
-  if (!id || !DATA.techspec[id]) {
+async function renderTechspec(c, id) {
+  const tIdx = (DATA.meta && DATA.meta.techspecIndex) || {};
+  const list = Object.entries(tIdx).map(([tid, v]) => ({ id: tid, ...v })).sort((a, b) => a.doc_no.localeCompare(b.doc_no));
+  if (!id || !tIdx[id]) {
     c.innerHTML = `
       <div class="page-head">
         <div class="page-title">技术要求生成器</div>
@@ -802,7 +860,12 @@ function renderTechspec(c, id) {
       </div>`;
     return;
   }
-  const d = DATA.techspec[id];
+  c.innerHTML = `<div class="empty">正在加载技术要求内容…</div>`;
+  let d;
+  try { d = await getTechspec(id); } catch (e) {
+    c.innerHTML = `<div class="empty">技术要求内容加载失败，请检查网络后刷新重试。</div>`;
+    return;
+  }
   const S = DATA.surface;
   c.innerHTML = `
     <div class="crumb"><a href="#/home">首页</a> / <a href="#/techspec">技术要求生成器</a> / ${esc(d.title)}</div>

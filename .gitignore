@@ -7,3 +7,5 @@ data/change.json
 word-docs/
 *.log
 .DS_Store
+
+data/bundle*.json
