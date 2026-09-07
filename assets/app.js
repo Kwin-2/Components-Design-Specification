@@ -54,8 +54,10 @@ async function unlock() {
     const payload = JSON.parse(new TextDecoder().decode(pt));
     if (payload.marker !== 'MORLUS-LOCK-V1') throw new Error('BAD MARKER');
     DATA.docs = payload.docs || {};
+    DATA.techspec = payload.techspec || {};
     DATA.parts = (payload.parts && payload.parts.parts) || [];
     DATA.surface = payload.surface;
+    DATA.change = payload.change;
     document.getElementById('lock').classList.add('hide');
     input.value = '';
     renderNav();
@@ -107,7 +109,10 @@ function renderNav() {
 function markActive() {
   document.querySelectorAll('.nav-item[data-view]').forEach(a => {
     const id = a.dataset.id;
-    const on = a.dataset.view === 'doc' ? location.hash === `#/doc/${id}` : location.hash === `#/${a.dataset.view}`;
+    let on;
+    if (a.dataset.view === 'doc') on = location.hash === `#/doc/${id}`;
+    else if (a.dataset.view === 'techspec') on = location.hash.startsWith('#/techspec');
+    else on = location.hash === `#/${a.dataset.view}`;
     a.classList.toggle('active', on);
   });
 }
@@ -129,6 +134,8 @@ function route() {
   }
   if (h.startsWith('#/parts')) { renderParts(content, decodeURIComponent(h.slice(7).replace(/^\//, ''))); return; }
   if (h.startsWith('#/surface')) { renderSurface(content); return; }
+  if (h.startsWith('#/change')) { renderChange(content); return; }
+  if (h.startsWith('#/techspec')) { renderTechspec(content, h.slice(10).replace(/^\//, '')); return; }
   if (h.startsWith('#/checklist')) { renderChecklist(content, h.slice(11).replace(/^\//, '')); return; }
   if (h.startsWith('#/about')) { renderAbout(content); return; }
   if ((m = h.match(/^#\/search\/(.+)$/))) { renderSearch(content, decodeURIComponent(m[1])); return; }
@@ -655,7 +662,206 @@ function renderSearch(c, q) {
   `;
 }
 
-/* ---------------- 使用说明 ---------------- */
+/* ---------------- 变更验证查字典 ---------------- */
+let chgState = { cat: null, types: new Set() };
+function renderChange(c) {
+  const CH = DATA.change;
+  if (!CH) { c.innerHTML = `<div class="empty">变更验证数据缺失</div>`; return; }
+  if (!chgState.cat) chgState.cat = CH.categories[0].id;
+  c.innerHTML = `
+    <div class="page-head">
+      <div class="page-title">变更验证查字典</div>
+      <div class="page-desc">选择零件类别与变更类型（可多选），自动生成验证活动清单（零件级→装配级→Pack级）、PPAP要求与流程步骤。依据《变更验证管理办法 ML-GL-01》。</div>
+    </div>
+    <div class="selector">
+      <div class="card pad sel-panel">
+        <div class="sel-group"><div class="sg-label">① 零件类别</div>
+          <select id="chgCat" onchange="chgCatChange(this.value)" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;font-size:13.5px">
+            ${CH.categories.map(x => `<option value="${x.id}" ${x.id === chgState.cat ? 'selected' : ''}>[${x.level}] ${esc(x.name)}</option>`).join('')}
+          </select>
+          <div class="muted" id="chgCatNote" style="margin-top:6px"></div>
+        </div>
+        <div class="sel-group"><div class="sg-label">② 变更类型（可多选）</div>
+          <div class="sel-opts" style="flex-direction:column;align-items:stretch">
+            ${CH.changeTypes.map(t => `<label class="check-item" style="margin-bottom:4px;padding:7px 10px;font-size:13.5px">
+              <input type="checkbox" data-t="${t.id}" onchange="chgTypeToggle(this)" ${chgState.types.has(t.id) ? 'checked' : ''}>
+              <span class="ci-text"><b>${esc(t.name)}</b><br><span class="muted">${esc(t.desc)}</span></span></label>`).join('')}
+          </div>
+        </div>
+      </div>
+      <div id="chgResult"></div>
+    </div>
+  `;
+  chgCatChange(chgState.cat);
+}
+function chgCatChange(id) {
+  chgState.cat = id;
+  const CH = DATA.change;
+  const cat = CH.categories.find(x => x.id === id);
+  const note = document.getElementById('chgCatNote');
+  if (note) note.textContent = (CH.levels[cat.level] || {}).desc || '';
+  runChg();
+}
+function chgTypeToggle(el) {
+  if (el.checked) chgState.types.add(el.dataset.t); else chgState.types.delete(el.dataset.t);
+  runChg();
+}
+function runChg() {
+  const box = document.getElementById('chgResult');
+  if (!box || !chgState.cat) return;
+  const CH = DATA.change;
+  const cat = CH.categories.find(x => x.id === chgState.cat);
+  if (!chgState.types.size) {
+    box.innerHTML = `<div class="card pad"><div class="card-title">📌 ${esc(cat.name)} · 安全等级 <span class="badge ${CH.levels[cat.level].color}">${cat.level} ${CH.levels[cat.level].name}</span></div>
+      <div class="muted">${esc(CH.levels[cat.level].desc)}。请在左侧勾选变更类型以生成验证清单。</div></div>`;
+    return;
+  }
+  const act = a => CH.activities.find(x => x.id === a);
+  const partSet = new Set(), asmSet = new Set(), packSet = new Set();
+  const conds = [];
+  const typesSel = [...chgState.types].map(t => CH.changeTypes.find(x => x.id === t));
+  typesSel.forEach(t => {
+    const m = CH.matrix[t.id][cat.level];
+    m.part.forEach(x => partSet.add(x));
+    m.assembly.forEach(x => asmSet.add(x));
+    m.pack.forEach(x => packSet.add(x));
+    if (m.cond) conds.push(`<b>${t.name}</b>：${m.cond}`);
+  });
+  const group = (set, title, icon) => set.size ? `
+    <div class="sec-title"><span class="bar"></span>${icon} ${title}（${set.size} 项）</div>
+    ${[...set].map(id => {
+      const a = act(id);
+      return `<div class="treat-card" style="padding:12px 15px">
+        <div class="tc-head"><span class="rule-id">${a.id}</span><span class="tc-name" style="font-size:14.5px">${esc(a.name)}</span></div>
+        <div class="tc-meta"><span class="kv">方法 <b>${esc(a.method)}</b></span><span class="kv">标准 <b>${esc(a.standard)}</b></span></div>
+        <div class="muted">📄 输出物：${esc(a.output)}</div>
+      </div>`;
+    }).join('')}` : '';
+  const supplier = chgState.types.has('supplier');
+  box.innerHTML = `
+    <div class="card pad" style="margin-bottom:12px">
+      <div class="card-title">判定结果：${esc(cat.name)} · 安全等级 <span class="badge ${CH.levels[cat.level].color}">${cat.level} ${CH.levels[cat.level].name}</span></div>
+      <div class="muted">变更类型：${typesSel.map(t => esc(t.name)).join('、')}　|　验证级别取并集，安全等级取最高级</div>
+      <div style="margin-top:10px"><button class="btn" onclick="copyChg()">📋 复制验证清单（可直接进变更申请单）</button></div>
+    </div>
+    ${group(partSet, '零件级验证', '🔧')}
+    ${group(asmSet, '装配级验证（试装）', '🧩')}
+    ${group(packSet, 'Pack级验证', '🔋')}
+    ${packSet.size ? `<div class="callout warn"><b>⚠</b>Pack级验证样件数：S级材料/工艺/供应商变更建议≥3台份，其余≥1台份或按评审。</div>` : ''}
+    ${supplier ? `<div class="sec-title"><span class="bar"></span>📦 供应商提交要求（PPAP）</div>
+      <div class="callout" style="background:#fff;border:1px solid var(--line)">${esc(CH.supplierDocs[cat.level])}</div>` : ''}
+    ${conds.length ? `<div class="sec-title"><span class="bar"></span>📌 条件与备注</div>${conds.map(x => `<div class="callout tip">${x}</div>`).join('')}` : ''}
+    <div class="sec-title"><span class="bar"></span>📋 执行流程（十步法）</div>
+    <table class="tbl"><thead><tr><th>步骤</th><th>输出物</th><th>责任人</th></tr></thead>
+    <tbody>${CH.flow.map(f => `<tr><td>${esc(f.step)}</td><td>${esc(f.output)}</td><td>${esc(f.owner)}</td></tr>`).join('')}</tbody></table>
+  `;
+}
+function copyChg() {
+  const CH = DATA.change;
+  const cat = CH.categories.find(x => x.id === chgState.cat);
+  const typesSel = [...chgState.types].map(t => CH.changeTypes.find(x => x.id === t));
+  const partSet = new Set(), asmSet = new Set(), packSet = new Set();
+  typesSel.forEach(t => {
+    const m = CH.matrix[t.id][cat.level];
+    m.part.forEach(x => partSet.add(x)); m.assembly.forEach(x => asmSet.add(x)); m.pack.forEach(x => packSet.add(x));
+  });
+  const fmt = set => [...set].map(id => { const a = CH.activities.find(x => x.id === id); return `${a.id} ${a.name}（${a.standard}）`; }).join('\n');
+  const txt = [
+    `【变更验证清单】${cat.name}（安全等级 ${cat.level} ${CH.levels[cat.level].name}）`,
+    `变更类型：${typesSel.map(t => t.name).join('、')}`,
+    ``,
+    `一、零件级验证：\n${fmt(partSet) || '（无）'}`,
+    ``,
+    `二、装配级验证（试装）：\n${fmt(asmSet) || '（无）'}`,
+    ``,
+    `三、Pack级验证：\n${fmt(packSet) || '（无）'}`,
+    ``,
+    chgState.types.has('supplier') ? `四、供应商提交（PPAP）：${CH.supplierDocs[cat.level]}` : '',
+    ``,
+    `五、流程：${CH.flow.map(f => f.step).join(' → ')}`,
+  ].filter(x => x !== '').join('\n');
+  navigator.clipboard.writeText(txt).then(() => toast('验证清单已复制到剪贴板'));
+}
+
+/* ---------------- 技术要求生成器 ---------------- */
+let techState = { env: 'p3', supplier: true };
+function renderTechspec(c, id) {
+  const list = Object.values(DATA.techspec || {}).sort((a, b) => a.doc_no.localeCompare(b.doc_no));
+  if (!id || !DATA.techspec[id]) {
+    c.innerHTML = `
+      <div class="page-head">
+        <div class="page-title">技术要求生成器</div>
+        <div class="page-desc">按物料大类选择通用技术要求（ML-TR 系列）：同一工艺的零件外形可变、验收条款不变。选定后可复制生成标准化技术要求文本，粘贴进图纸技术要求栏或作为供应商规格书。全套 Word 版见内部发放。</div>
+      </div>
+      <div class="grid cols-2">
+        ${list.map(d => `<a class="doc-card" href="#/techspec/${d.id}">
+          <div class="dc-no">${esc(d.doc_no)}</div>
+          <div class="dc-title">${esc(d.title)}</div>
+          <div class="dc-sub">${esc(d.subtitle || '')}</div>
+        </a>`).join('')}
+      </div>`;
+    return;
+  }
+  const d = DATA.techspec[id];
+  const S = DATA.surface;
+  c.innerHTML = `
+    <div class="crumb"><a href="#/home">首页</a> / <a href="#/techspec">技术要求生成器</a> / ${esc(d.title)}</div>
+    <div class="page-head"><div class="page-title">${esc(d.doc_no)} ${esc(d.title)}</div>
+    <div class="page-desc">${esc(d.subtitle || '')}</div></div>
+    <div class="selector">
+      <div class="card pad sel-panel">
+        <div class="sel-group"><div class="sg-label">① 使用位置（防腐分级）</div>
+          <div class="sel-opts" id="tsEnv">${S.environments.map(e => `<button class="sel-opt ${e.id === techState.env ? 'active' : ''}" data-e="${e.id}" onclick="techEnv('${e.id}')">${esc(e.name)}</button>`).join('')}</div>
+        </div>
+        <div class="sel-group"><div class="sg-label">② 输出选项</div>
+          <label class="check-item" style="font-size:13.5px"><input type="checkbox" id="tsSup" ${techState.supplier ? 'checked' : ''} onchange="techState.supplier=this.checked"><span class="ci-text">包含供应商提交/变更要求（PPAP/FAI/COA）</span></label>
+        </div>
+        <div class="sel-group">
+          <button class="btn" style="width:100%" onclick="copyTechspec('${d.id}')">📋 生成并复制技术要求文本</button>
+          <div class="muted" style="margin-top:8px">复制内容=本文件全部章节 + 所选防腐位置条款；可直接粘贴进图纸『技术要求』栏，并注明"其余要求按 ${esc(d.doc_no)} 执行"。</div>
+        </div>
+        ${(d.surface || []).length ? `<div class="sel-group"><div class="sg-label">所选位置防腐条款预览</div>
+          ${d.surface.filter(s => s.location.includes(techState.env.toUpperCase()) || s.location.includes('P1') && techState.env === 'p1' || s.location.includes('P2') && techState.env === 'p2' || s.location.includes('P3') && techState.env === 'p3' || s.location.includes('P4') && techState.env === 'p4').map(s => `<div class="treat-card" style="padding:10px 12px"><b>${esc(s.location)}</b>：${esc(s.treatment)}（${esc(s.nss)}）<div class="muted">${esc(s.note || '')}</div></div>`).join('') || `<div class="muted">无</div>`}</div>` : ''}
+      </div>
+      <div>
+        <div class="doc-section">${renderBlocks(d.blocks || [])}</div>
+        ${(d.mistakes || []).length ? `<div class="doc-section"><h2>供应商常见违规点（验收红线）</h2><ol style="padding-left:22px">${d.mistakes.map(m => `<li style="margin-bottom:8px">${esc(m)}</li>`).join('')}</ol></div>` : ''}
+        ${(d.sources || []).length ? `<div class="doc-section"><h2>引用标准与来源</h2><ul>${d.sources.map(s => `<li>${esc(s)}</li>`).join('')}</ul></div>` : ''}
+      </div>
+    </div>
+  `;
+}
+function techEnv(id) { techState.env = id; document.querySelectorAll('#tsEnv .sel-opt').forEach(b => b.classList.toggle('active', b.dataset.e === id)); }
+function copyTechspec(id) {
+  const d = DATA.techspec[id];
+  const env = DATA.surface.environments.find(e => e.id === techState.env);
+  const lines = [];
+  lines.push(`【${d.doc_no} ${d.title}】`);
+  if (d.subtitle) lines.push(d.subtitle);
+  lines.push('');
+  for (const b of d.blocks || []) {
+    if (b.type === 'h1') lines.push(`\n${b.no || ''} ${b.title || ''}`);
+    else if (b.type === 'h2') lines.push(`\n${b.no || ''} ${b.title || ''}`);
+    else if (b.type === 'p') lines.push(b.text);
+    else if (b.type === 'table') {
+      lines.push(`〔${b.caption || ''}〕`);
+      lines.push(b.header.join(' | '));
+      (b.rows || []).forEach(r => lines.push(r.join(' | ')));
+    } else if (b.type === 'rule') {
+      lines.push(`◆ ${b.level || ''} ${b.title || ''}：${b.spec ? '【' + b.spec + '】' : ''}${b.text || ''}`);
+    } else if (b.type === 'warn') lines.push(`⚠ ${b.text}`);
+    else if (b.type === 'tip') lines.push(`💡 ${b.text}`);
+  }
+  const surfRows = (d.surface || []).filter(s => s.location.toLowerCase().includes(techState.env));
+  if (surfRows.length) {
+    lines.push(`\n表面处理与防腐（${env.name}）：`);
+    surfRows.forEach(s => lines.push(`· ${s.location}：${s.treatment}，${s.nss}。${s.note || ''}`));
+  }
+  lines.push('\n备注：其余要求按 ' + d.doc_no + ' 执行；图纸另有要求时以图纸为准。');
+  const txt = lines.join('\n');
+  navigator.clipboard.writeText(txt).then(() => toast('技术要求文本已复制到剪贴板'));
+}
+
 function renderAbout(c) {
   c.innerHTML = `
     <div class="page-head"><div class="page-title">使用说明</div></div>
@@ -675,6 +881,11 @@ function renderAbout(c) {
       </ul>
       <h2>防腐位置分级（最重要的一条总则）</h2>
       <p>包外件与包内件的防腐要求完全不同：<b>P1 包外裸露 ≥720h 盐雾，P3 包内 ≥240h，P4 包内干燥 ≥96h</b>。任何金属零件先定级、再选涂层，详细逻辑见「表面处理选型器」。</p>
+      <h2>变更管理工具</h2>
+      <ul>
+        <li><b>变更验证查字典</b>：勾选零件类别+变更类型（材料/工艺/表面处理/供应商/配方/场地等），自动生成零件级→装配级→Pack级验证清单、PPAP要求与十步流程，依据《变更验证管理办法 ML-GL-01》；配套 Excel：output/变更验证Checklist.xlsx。</li>
+        <li><b>技术要求生成器</b>：按物料大类（ML-TR-01~19）选择通用技术要求，勾选防腐位置后一键生成可复制的技术要求文本，粘贴进图纸技术要求栏，避免要求丢失。</li>
+      </ul>
       <h2>配套 Word 文档</h2>
       <p>本网站全部内容同时输出为 Word 文档（格式与《电池系统紧固件选型规范_V1初版》一致），由设计部内部发放、打印与会签，不在本公开站点提供下载。</p>
       <h2>数据保护说明</h2>
