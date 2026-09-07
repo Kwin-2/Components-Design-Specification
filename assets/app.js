@@ -8,8 +8,8 @@ const DATA = {
 };
 const CAT_LABELS = {
   '结构件': ['sheet-metal', 'extrusion', 'die-casting', 'injection', 'machining-busbar', 'endplate-tiebar'],
-  '电气件': ['fpc', 'harness-cable', 'connector', 'bmu-ntc'],
-  '热管理': ['cold-plate'],
+  '电气件': ['fpc', 'ccs', 'harness-cable', 'connector', 'bmu-ntc', 'electrical-devices', 'ess-architecture'],
+  '热管理与安全': ['cold-plate', 'fire-explosion'],
   '密封胶粘': ['sealing', 'adhesive-thermal'],
   '绝缘隔热': ['insulation'],
   '紧固件': ['fasteners'],
@@ -17,7 +17,7 @@ const CAT_LABELS = {
   '焊接': ['welding'],
   '通用': ['overview'],
 };
-const CAT_ICONS = { '结构件': '🏗', '电气件': '⚡', '热管理': '❄', '密封胶粘': '💧', '绝缘隔热': '🔥', '紧固件': '🔩', '表面处理': '🛡', '焊接': '🪄', '通用': '📖' };
+const CAT_ICONS = { '结构件': '🏗', '电气件': '⚡', '热管理与安全': '🔥', '密封胶粘': '💧', '绝缘隔热': '🧱', '紧固件': '🔩', '表面处理': '🛡', '焊接': '🪄', '通用': '📖' };
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
