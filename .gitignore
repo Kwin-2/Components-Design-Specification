@@ -9,3 +9,4 @@ word-docs/
 .DS_Store
 
 data/bundle*.json
+data/cm.json

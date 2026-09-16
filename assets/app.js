@@ -3,10 +3,11 @@
 
 const DATA = {
   docs: {},      // id -> 已解密的规范全文（按需缓存）
-  meta: null,    // { docsIndex, parts, surface, change }
+  meta: null,    // { docsIndex, techspecIndex, parts, surface, change, cm }
   parts: [],     // parts.json
   surface: null, // surface.json
   change: null,  // change.json
+  cm: null,      // cm.json（变更管理执行手册）
   techspec: {},  // id -> 已解密的技术要求（按需缓存）
 };
 const CAT_LABELS = {
@@ -123,6 +124,7 @@ async function unlock() {
     DATA.parts = (meta.parts && meta.parts.parts) || [];
     DATA.surface = meta.surface;
     DATA.change = meta.change;
+    DATA.cm = meta.cm;
     document.getElementById('lock').classList.add('hide');
     input.value = '';
     renderNav();
@@ -200,6 +202,7 @@ function route() {
   if (h.startsWith('#/parts')) { renderParts(content, decodeURIComponent(h.slice(7).replace(/^\//, ''))); return; }
   if (h.startsWith('#/surface')) { renderSurface(content); return; }
   if (h.startsWith('#/change')) { renderChange(content); return; }
+  if (h.startsWith('#/cm')) { renderCm(content); return; }
   if (h.startsWith('#/techspec')) { renderTechspec(content, h.slice(10).replace(/^\//, '')); return; }
   if (h.startsWith('#/checklist')) { renderChecklist(content, h.slice(11).replace(/^\//, '')); return; }
   if (h.startsWith('#/about')) { renderAbout(content); return; }
@@ -925,34 +928,373 @@ function copyTechspec(id) {
   navigator.clipboard.writeText(txt).then(() => toast('技术要求文本已复制到剪贴板'));
 }
 
+/* ---------------- 变更管理执行手册（ML-M-07-16 A/2） ---------------- */
+let cmState = { type: 'product', lv: 'A', flags: new Set() };
+
+function cmDeriveLevel() {
+  if (cmState.flags.has('safe')) return 'S';
+  if (cmState.flags.has('crit') || cmState.flags.has('func') || cmState.flags.has('dim') || cmState.flags.has('mate')) return 'A';
+  if (cmState.flags.has('typo')) return 'C';
+  return 'B';
+}
+
+function renderCm(c) {
+  const M = DATA.cm;
+  if (!M) { c.innerHTML = `<div class="empty">变更管理手册数据缺失</div>`; return; }
+  c.innerHTML = `
+    <div class="crumb"><a href="#/home">首页</a> / 变更管理 / ${esc(M.title)}</div>
+    <div class="doc-header">
+      <div class="dh-no">${esc(M.docRef)} · 程序文件 + 附件2 审批表 + 10 张表单</div>
+      <h1>${esc(M.title)}</h1>
+      <div class="dh-sub">${esc(M.subtitle)}</div>
+      <div class="dh-meta">
+        <span class="chip">📋 11 步流程</span>
+        <span class="chip">📄 10 张表单</span>
+        <span class="chip">🔀 10 类变更 × 4 个等级</span>
+        <span class="chip">⏱ 评审 10 个工作日</span>
+        <span class="chip">⏳ 临时变更 ≤7 天</span>
+      </div>
+    </div>
+    <div class="doc-tabs">
+      <a href="#/cm#cm-wizard">🧭 我该怎么做</a>
+      <a href="#/cm#cm-steps">① 十步流程</a>
+      <a href="#/cm#cm-level">② 等级判定</a>
+      <a href="#/cm#cm-forms">③ 表单填写</a>
+      <a href="#/cm#cm-impact">④ 影响清单</a>
+      <a href="#/cm#cm-switch">⑤ 断点切换</a>
+      <a href="#/cm#cm-temp">⑥ 临时变更</a>
+      <a href="#/cm#cm-more">⑦ 职责/时限/坑</a>
+    </div>
+
+    <div class="doc-section">
+      <h2>先看这一页就够了</h2>
+      ${M.overview.map(p => `<p>${esc(p)}</p>`).join('')}
+      <div class="callout warn"><b>⚠ 两条铁律</b>设计冻结前按临时变更走；C 类变更无需验证，S/A/B 类必须验证通过后放行。</div>
+      <h3>新人照做顺序（10 步）</h3>
+      <ol style="padding-left:22px">${M.quickStart.map(s => `<li style="margin-bottom:6px">${esc(s)}</li>`).join('')}</ol>
+    </div>
+
+    <div class="doc-section anchor" id="cm-wizard">
+      <h2>🧭 我该怎么做 —— 输入你的情况，直接出答案</h2>
+      <p class="muted">先勾选等级判断项（可多选），再选变更类型：系统给出变更等级、审批路径（审核/批准/会签/关联会签部门）、是否重提 PPAP、必做步骤与所需表单。</p>
+      <div class="grid cols-2">
+        <div class="card pad">
+          <div class="card-title">第 1 步：判断等级（勾选符合的项）</div>
+          <label class="check-item"><input type="checkbox" data-flag="safe" onchange="cmFlag(this)"><span class="ci-text"><b>涉及安全或安全相关法律法规符合性</b><br><span class="muted">→ S 类</span></span></label>
+          <label class="check-item"><input type="checkbox" data-flag="crit" onchange="cmFlag(this)"><span class="ci-text"><b>影响关键/重要特殊特性、行业标准</b><br><span class="muted">→ A 类</span></span></label>
+          <label class="check-item"><input type="checkbox" data-flag="func" onchange="cmFlag(this)"><span class="ci-text"><b>影响功能、性能、可靠性、结构、接口（通用性/互换性）</b><br><span class="muted">→ A 类</span></span></label>
+          <label class="check-item"><input type="checkbox" data-flag="dim" onchange="cmFlag(this)"><span class="ci-text"><b>变更重要尺寸 / 影响与周边零件安装配合</b><br><span class="muted">→ A 类</span></span></label>
+          <label class="check-item"><input type="checkbox" data-flag="mate" onchange="cmFlag(this)"><span class="ci-text"><b>原材料变更</b><br><span class="muted">→ A 类</span></span></label>
+          <label class="check-item"><input type="checkbox" data-flag="typo" onchange="cmFlag(this)"><span class="ci-text"><b>只是技术文件勘误 / 标识符号不一致需纠正</b><br><span class="muted">→ C 类（免验证）</span></span></label>
+          <div class="muted" style="margin-top:8px">一项都不勾 → 默认 B 类。拿不准就取高等级，并在评审会上确认。</div>
+        </div>
+        <div class="card pad">
+          <div class="card-title">第 2 步：选择变更类型与等级</div>
+          <div class="sel-group"><div class="sg-label">变更类型（发起部门随之确定）</div>
+            <select id="cmType" onchange="cmTypeChange(this.value)" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;font-size:13.5px">
+              ${M.changeTypes.map(t => `<option value="${t.id}" ${t.id === cmState.type ? 'selected' : ''}>${esc(t.name)}（${esc(t.owner)}）</option>`).join('')}
+            </select>
+          </div>
+          <div class="sel-group"><div class="sg-label">变更等级（可手动覆盖自动判定）</div>
+            <div class="sel-opts">${['S', 'A', 'B', 'C'].map(l => `<button class="sel-opt" data-lv="${l}" onclick="cmSetLv('${l}')">${l} 类</button>`).join('')}</div>
+          </div>
+          <div class="muted">自动判定结果随勾选实时更新。</div>
+        </div>
+      </div>
+      <div id="cmResult" style="margin-top:14px"></div>
+    </div>
+
+    <div class="doc-section anchor" id="cm-steps">
+      <h2>① 十步流程：每一步谁做、做什么、交什么表</h2>
+      ${M.steps.map(s => `
+        <details class="rule" style="border-left-color:var(--brand)" ${s.no === '1' ? 'open' : ''}>
+          <summary style="cursor:pointer;padding:10px 16px;background:#f3f6fb;font-weight:700">
+            <span class="badge" style="background:#eef2f8;color:var(--ink-2)">步骤 ${esc(s.no)}</span>
+            ${esc(s.title)} <span class="muted" style="font-weight:400">· 程序 ${esc(s.ref)} · ${esc(s.who)}</span>
+          </summary>
+          <div class="rule-body">
+            <div class="rb-line"><b>📌 做什么</b></div>
+            <ol style="padding-left:22px">${(s.actions || []).map(a => `<li style="margin-bottom:5px">${esc(a)}</li>`).join('')}</ol>
+            ${(s.outputs || []).length ? `<div class="rb-line"><b>📄 输出</b>${s.outputs.map(esc).join('；')}</div>` : ''}
+            ${(s.forms || []).length ? `<div class="rb-line"><b>🧾 表单</b>${s.forms.map(esc).join('；')}</div>` : ''}
+            ${s.deadline ? `<div class="rb-line"><b>⏱ 时限</b>${esc(s.deadline)}</div>` : ''}
+            ${(s.tips || []).length ? `<div class="callout tip"><b>💡</b>${s.tips.map(esc).join('<br>')}</div>` : ''}
+            ${(s.traps || []).length ? `<div class="callout warn"><b>⚠ 容易踩的坑</b>${s.traps.map(esc).join('<br>')}</div>` : ''}
+          </div>
+        </details>`).join('')}
+    </div>
+
+    <div class="doc-section anchor" id="cm-level">
+      <h2>② 变更等级怎么判（S/A/B/C）</h2>
+      <div class="grid cols-2">
+        ${M.levels.map(l => `<div class="card pad">
+          <div class="card-title"><span class="badge ${l.k === 'S' ? 'must' : l.k === 'A' ? '' : 'rec'}">${l.k} 类</span> ${esc(l.name)}</div>
+          <div><b>定义：</b>${esc(l.def)}</div>
+          <div style="margin-top:6px"><b>举例：</b>${esc(l.examples)}</div>
+          <div style="margin-top:6px"><b>验证：</b>${esc(l.verify)}</div>
+          <div style="margin-top:6px"><b>签批：</b>${esc(l.sign)}</div>
+        </div>`).join('')}
+      </div>
+      <h3>判定顺序（从上往下，命中即止）</h3>
+      <ol style="padding-left:22px">${M.levelJudge.map(x => `<li style="margin-bottom:5px">${esc(x)}</li>`).join('')}</ol>
+      <h3>要不要通知客户</h3>
+      <p>${esc(M.notifyCustomer.intro)}</p>
+      <div class="callout warn">${M.notifyCustomer.cases.map((x, i) => `${i + 1}. ${esc(x)}`).join('<br>')}</div>
+      <div class="rb-line"><b>谁来通知</b>${esc(M.notifyCustomer.who)}</div>
+      <div class="rb-line"><b>拿到批准后</b>${esc(M.notifyCustomer.what)}</div>
+      <div class="callout tip"><b>💡 审批矩阵备注</b>${esc(M.approveNote)}</div>
+    </div>
+
+    <div class="doc-section anchor" id="cm-forms">
+      <h2>③ 表单怎么填：10 张记录表</h2>
+      <p class="muted">ECR 编号与 ECN 编号均需联系品质部取号。</p>
+      ${M.forms.map(f => `<details class="rule">
+        <summary style="cursor:pointer;padding:10px 16px;background:#f3f6fb;font-weight:700">
+          <span class="rule-id">${esc(f.code)}</span> ${esc(f.name)} <span class="muted" style="font-weight:400">· ${esc(f.who)} · ${esc(f.when)}</span>
+        </summary>
+        <div class="rule-body">
+          <div class="rb-line"><b>🧾 主要栏目</b></div>
+          <ul style="padding-left:22px">${f.fields.map(x => `<li style="margin-bottom:4px">${esc(x)}</li>`).join('')}</ul>
+          ${f.points ? `<div class="callout tip"><b>💡 填写要点</b>${esc(f.points)}</div>` : ''}
+        </div>
+      </details>`).join('')}
+    </div>
+
+    <div class="doc-section anchor" id="cm-impact">
+      <h2>④ 影响评估清单（006 表）—— 逐项打勾，别漏</h2>
+      <p class="muted">变更前把所有受影响的文件、物料、人员、IT 系统一次性列清；勾选状态保存在本机浏览器。</p>
+      <div class="check-progress">
+        <span style="font-size:13px;color:var(--ink-2)">影响评估完成度</span>
+        <div class="bar"><i id="cmFill" style="width:0%"></i></div>
+        <span class="pct" id="cmPct">0/0</span>
+        <button class="btn ghost" style="font-size:12.5px;padding:5px 14px" onclick="cmResetImpact()">重置</button>
+      </div>
+      <div class="grid cols-2">
+        ${M.impactChecklist.map((g, gi) => `<div class="card pad">
+          <div class="card-title">${esc(g.group)}</div>
+          <div class="muted" style="margin-bottom:6px">责任部门：${esc(g.owner)}</div>
+          ${g.items.map((it, ii) => `<label class="check-item" data-cmck="${gi}-${ii}"><input type="checkbox" onchange="cmToggleImpact(this)"><span class="ci-text">${esc(it)}</span></label>`).join('')}
+        </div>`).join('')}
+      </div>
+      <h3>物料处置方式（二选一）</h3>
+      <div class="grid cols-2">${M.switchModes.map(s => `<div class="card pad"><div class="card-title">${esc(s.name)}</div><div class="muted">${esc(s.d)}</div></div>`).join('')}</div>
+    </div>
+
+    <div class="doc-section anchor" id="cm-switch">
+      <h2>⑤ 实施与断点切换（011 表）</h2>
+      <h3>实施阶段典型任务</h3>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>任务项</th><th>负责部门</th></tr></thead>
+        <tbody>${M.implementTasks.map(t => `<tr><td>${esc(t.task)}</td><td>${esc(t.owner)}</td></tr>`).join('')}</tbody>
+      </table></div>
+      <h3>三类断点管理</h3>
+      <div class="grid cols-2">${M.breakpoints.map(b => `<div class="card pad"><div class="card-title">${esc(b.kind)}</div><div class="muted">${esc(b.d)}</div></div>`).join('')}</div>
+      <h3>实施阶段各部门要做什么</h3>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>部门</th><th>变更实施中的职责</th></tr></thead>
+      <tbody>${M.duties.map(d => `<tr><td>${esc(d.dept)}</td><td>${esc(d.impl)}</td></tr>`).join('')}</tbody></table></div>
+    </div>
+
+    <div class="doc-section anchor" id="cm-temp">
+      <h2>⑥ 临时变更（7.13）—— 用不好就是失控</h2>
+      <ol style="padding-left:22px">${M.tempChange.rules.map(r => `<li style="margin-bottom:6px">${esc(r)}</li>`).join('')}</ol>
+      <div class="callout warn"><b>⚠ 最容易违规的三条</b>超期未转正式变更；未盖「临时文件」印章就发文；未获顾客书面认可就送货。</div>
+    </div>
+
+    <div class="doc-section anchor" id="cm-more">
+      <h2>⑦ 职责速查 / 时限 / 常见坑</h2>
+      <h3>时限要求</h3>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>事项</th><th>时限</th></tr></thead>
+      <tbody>${M.timeLimits.map(t => `<tr><td>${esc(t.item)}</td><td>${esc(t.limit)}</td></tr>`).join('')}</tbody></table></div>
+      <h3>各部门职责（申请 / 评审 / 实施）</h3>
+      ${M.duties.map(d => `<details class="rule">
+        <summary style="cursor:pointer;padding:9px 16px;background:#f3f6fb;font-weight:700">${esc(d.dept)}</summary>
+        <div class="rule-body">
+          <div class="rb-line"><b>申请阶段</b>${esc(d.apply)}</div>
+          <div class="rb-line"><b>评审阶段</b>${esc(d.review)}</div>
+          <div class="rb-line"><b>实施阶段</b>${esc(d.impl)}</div>
+        </div>
+      </details>`).join('')}
+      <h3>变更资料归档（9 类）</h3>
+      <ul style="padding-left:22px">${M.archive.items.map(x => `<li style="margin-bottom:4px">${esc(x)}</li>`).join('')}</ul>
+      <div class="muted">归档责任人：${esc(M.archive.who)}</div>
+      <h3>常见坑（前人踩过）</h3>
+      <ol style="padding-left:22px">${M.traps.map(t => `<li style="margin-bottom:6px">${esc(t)}</li>`).join('')}</ol>
+      <h3>术语速查</h3>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>术语</th><th>定义</th></tr></thead>
+      <tbody>${M.terms.map(t => `<tr><td>${esc(t.t)}</td><td>${esc(t.d)}</td></tr>`).join('')}</tbody></table></div>
+      <h3>相关程序文件</h3>
+      <ul style="padding-left:22px">${M.refDocs.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
+    </div>
+
+    <div class="doc-section">
+      <h2>配套工具</h2>
+      <div class="callout tip"><b>💡</b>本页管「流程怎么走」；<a href="#/change">变更验证查字典</a>管「技术上要验证什么」（按零件类别 × 变更类型出验证清单）；<a href="#/techspec">技术要求生成器</a>管「供应商按什么标准验收」。</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px">
+        <a class="btn" href="#/change">→ 打开变更验证查字典</a>
+        <a class="btn ghost" href="#/techspec">→ 打开技术要求生成器</a>
+        <button class="btn ghost" onclick="window.print()">🖨 打印本页</button>
+      </div>
+    </div>
+  `;
+  cmSyncUI();
+  cmRenderResult();
+  cmUpdateImpactBar();
+}
+
+function cmFlag(el) {
+  if (el.checked) cmState.flags.add(el.dataset.flag); else cmState.flags.delete(el.dataset.flag);
+  cmState.lv = cmDeriveLevel();
+  cmSyncUI();
+  cmRenderResult();
+}
+function cmTypeChange(v) { cmState.type = v; cmSyncUI(); cmRenderResult(); }
+function cmSetLv(l) { cmState.lv = l; cmSyncUI(); cmRenderResult(); }
+function cmSyncUI() {
+  document.querySelectorAll('#cm-wizard .sel-opt[data-lv]').forEach(b => b.classList.toggle('active', b.dataset.lv === cmState.lv));
+  const sel = document.getElementById('cmType');
+  if (sel) sel.value = cmState.type;
+}
+function cmRenderResult() {
+  const box = document.getElementById('cmResult');
+  if (!box || !DATA.cm) return;
+  const M = DATA.cm;
+  const t = M.changeTypes.find(x => x.id === cmState.type);
+  if (!t) return;
+  const lv = cmState.lv;
+  const row = t.rows.find(r => r.lv === lv) || t.rows.find(r => r.lv === 'S/A') || t.rows[0];
+  const auto = cmDeriveLevel();
+  const overridden = auto !== lv;
+  box.innerHTML = `
+    <div class="card pad">
+      <div class="card-title">✅ 判定结果：${esc(t.name)} · <span class="badge ${lv === 'S' ? 'must' : lv === 'A' ? '' : 'rec'}">${lv} 类</span>
+        ${overridden ? `<span class="muted" style="font-size:12px">（手动选择，自动判定为 ${auto} 类）</span>` : ''}</div>
+      <div class="grid cols-2" style="margin-top:8px">
+        <div>
+          <div class="rb-line"><b>发起部门</b>${esc(t.owner)}</div>
+          <div class="rb-line"><b>变更内容</b>${esc(t.content)}</div>
+          <div class="rb-line"><b>关联会签部门</b>${row.join.map(x => `<span class="chip">${esc(x)}</span>`).join(' ')}</div>
+          <div class="rb-line"><b>审核人</b>${esc(row.review)}</div>
+          <div class="rb-line"><b>批准人</b>${esc(row.approve)}</div>
+          ${row.sign && row.sign !== '—' ? `<div class="rb-line"><b>会签负责人</b>${esc(row.sign)}</div>` : ''}
+          <div class="rb-line"><b>重新提交 PPAP</b>${esc(row.ppap || '否')}</div>
+          <div class="rb-line"><b>签批层级</b>${lv === 'S' || lv === 'A' ? '各部门经理及以上（S/A 类）' : '负责工程师（B/C 类）'}</div>
+        </div>
+        <div>
+          <div class="rb-line"><b>必做步骤</b></div>
+          <ol style="padding-left:20px;font-size:13.5px">
+            <li>识别与策划（等级、类型、影响范围）</li>
+            <li>提《变更申请与评审单》001 第一、二模块</li>
+            <li>组织评审会 → 001 第三模块（10 个工作日内）${lv === 'C' ? '' : '；同意后出《变更准备阶段计划表》008'}</li>
+            <li>按左侧签批${lv === 'S' || lv === 'A' ? '（S/A 类必要时发起管理层评审会议）' : ''}</li>
+            ${lv === 'C'
+              ? '<li><b>C 类免验证</b>：直接进入实施</li>'
+              : '<li>出《变更验证计划表》009 并执行验证（样件与正常品隔离，验证通过方可出货）</li><li>验证结果评审 → 出《变更验证确认单》002 + 《变更实施影响评估表》006</li><li>需通知客户时取得顾客批准' + (row.ppap === '是' ? '，并按 ML-M-05-01 重新提交 PPAP' : '') + '</li>'}
+            <li>实施：出《变更标准化计划表》010 + 《变更实施计划表》011，做好信息/物料/实物断点</li>
+            <li>跟踪实施结果 → 变更问题清单 → 结果评审签字</li>
+            <li>资料归档（9 类）+ 文控更新台账</li>
+          </ol>
+          <div class="muted">需要用的表：001、${lv === 'C' ? '010、011' : '008、009、002、006、010、011'}</div>
+        </div>
+      </div>
+      <div style="margin-top:10px"><button class="btn" onclick="cmCopy()">📋 复制本次执行清单</button></div>
+    </div>`;
+}
+function cmCopy() {
+  const M = DATA.cm;
+  const t = M.changeTypes.find(x => x.id === cmState.type);
+  const row = t.rows.find(r => r.lv === cmState.lv) || t.rows[0];
+  const txt = [
+    `【变更执行清单】${t.name}（${cmState.lv} 类）`,
+    `发起部门：${t.owner}`,
+    `变更内容：${t.content}`,
+    `关联会签部门：${row.join.join('、')}`,
+    `审核人：${row.review}　批准人：${row.approve}${row.sign && row.sign !== '—' ? '　会签负责人：' + row.sign : ''}`,
+    `重新提交PPAP：${row.ppap || '否'}　签批层级：${cmState.lv === 'S' || cmState.lv === 'A' ? '各部门经理及以上' : '负责工程师'}`,
+    '',
+    '流程：识别策划 → 提申请(001 一/二模块) → 评审会(001 三模块，10 个工作日) → 签批 → '
+      + (cmState.lv === 'C' ? 'C类免验证 → ' : '验证(009) → 结果评审(002+006) → ')
+      + '实施(010+011) → 跟踪 → 结果评审 → 归档',
+    '',
+    '时限：评审 10 个工作日；临时变更有效期 ≤7 天；切换时点变动至少提前 1 天通知',
+  ].join('\n');
+  navigator.clipboard.writeText(txt).then(() => toast('执行清单已复制'));
+}
+function cmImpactStore() { try { return JSON.parse(localStorage.getItem('mlcm006') || '{}'); } catch (e) { return {}; } }
+function cmToggleImpact(el) {
+  const key = el.closest('.check-item').dataset.cmck;
+  const st = cmImpactStore();
+  st[key] = el.checked;
+  localStorage.setItem('mlcm006', JSON.stringify(st));
+  el.closest('.check-item').classList.toggle('checked', el.checked);
+  cmUpdateImpactBar();
+}
+function cmResetImpact() {
+  localStorage.removeItem('mlcm006');
+  document.querySelectorAll('.check-item[data-cmck]').forEach(it => { it.classList.remove('checked'); const cb = it.querySelector('input'); if (cb) cb.checked = false; });
+  cmUpdateImpactBar();
+  toast('影响清单已重置');
+}
+function cmUpdateImpactBar() {
+  const items = document.querySelectorAll('.check-item[data-cmck]');
+  if (!items.length) return;
+  const st = cmImpactStore();
+  let done = 0;
+  items.forEach(it => {
+    const on = !!st[it.dataset.cmck];
+    const cb = it.querySelector('input');
+    if (cb) cb.checked = on;
+    it.classList.toggle('checked', on);
+    if (on) done++;
+  });
+  const fill = document.getElementById('cmFill'), pct = document.getElementById('cmPct');
+  if (fill) fill.style.width = (done / items.length * 100) + '%';
+  if (pct) pct.textContent = `${done}/${items.length}`;
+}
+
 function renderAbout(c) {
   c.innerHTML = `
     <div class="page-head"><div class="page-title">使用说明</div></div>
     <div class="doc-section">
       <h2>这个库是什么</h2>
-      <p>懋略设计规则库是电池系统设计部的零部件设计规范在线版，覆盖托盘、上盖、冷板、铝排/铜排、FPC、线束、高压电缆、BMU、紧固件、绝缘膜、胶粘剂、密封圈、水管、模组端板/拉条、塑胶件、气凝胶、保温棉、动力插头、温感等全部电池包零部件，共 ${Object.keys(DATA.docs).length} 份规范。</p>
-      <h2>新人的标准用法（三步）</h2>
+      <p>懋略设计规则库是电池系统设计部的工程知识在线平台，共 <b>${Object.keys((DATA.meta && DATA.meta.docsIndex) || {}).length} 份设计规范</b>（ML-DR 系列，覆盖托盘、上盖、冷板、铝排/铜排、FPC、CCS、线束、高压电缆、BMU、紧固件、绝缘膜、胶粘剂、密封圈、水管、模组端板/拉条、塑胶件、气凝胶、保温棉、动力插头、温感等全部电池包与储能零部件）、<b>${Object.keys((DATA.meta && DATA.meta.techspecIndex) || {}).length} 份通用技术要求</b>（ML-TR 系列）与 <b>1 份变更管理执行手册</b>（ML-M-07-16 A/2）。</p>
+
+      <h2>🚩 新人第一站</h2>
       <ul>
-        <li><b>画图前</b>：在「零件检索」找到自己要设计的零件 → 打开对应规范通读一遍，重点看 <span class="badge must">强制</span> 规则；</li>
-        <li><b>画图时</b>：用顶部搜索框随时查具体数值（如"折弯半径""压缩率""爬电距离"）；拿不准表面处理时用「表面处理选型器」；</li>
-        <li><b>下发前</b>：打开「在线自查清单」逐项打勾，全部 <span class="badge must">强制</span> 项必须满足后才能提交评审。</li>
+        <li><b>我要设计一个新零件</b>：先用顶部搜索或「零件检索」找到零件 → 读对应规范（重点看 <span class="badge must">强制</span> 规则）→ 用「技术要求生成器」生成技术要求文本贴进图纸 → 下发前用「在线自查清单」逐项打勾。</li>
+        <li><b>我要处理一次变更</b>：先看 <a href="#/cm">「变更管理执行手册」</a> → 用其中的向导勾选情况，直接得到等级、审批路径、必做步骤与所需表单 → 再用 <a href="#/change">「变更验证查字典」</a>查出技术上要验证什么。</li>
       </ul>
+
+      <h2>四个工具怎么配合用</h2>
+      <ul>
+        <li><b>🧭 变更管理执行手册</b>（ML-M-07-16 A/2）：<b>流程怎么走</b>。等级判定向导、11 步流程、10 张表单填写要点、审批路径（审核/批准/会签/PPAP）、影响评估清单、断点切换、临时变更、职责与时限。<span class="muted">替代翻 14 页程序文件。</span></li>
+        <li><b>🔄 变更验证查字典</b>：<b>技术上要验证什么</b>。按零件类别（55 类）× 变更类型（材料/工艺/表面处理/供应商/配方/场地等）自动生成零件级 → 装配级 → Pack 级验证清单与 PPAP 要求。</li>
+        <li><b>📋 技术要求生成器</b>：<b>供应商按什么验收</b>。19 类物料通用技术要求（材料→工艺→表面处理→性能→老化耐候→检验方法与标准号），选好防腐位置一键生成可复制文本，避免图纸技术要求丢失。</li>
+        <li><b>🛡 表面处理选型器 + ☑ 在线自查清单</b>：防腐定级选型（P1~P4）与图纸下发前的打勾自查。</li>
+      </ul>
+
       <h2>规则分级说明</h2>
       <ul>
         <li><span class="badge must">强制</span> 涉及安全（高压绝缘、结构强度、密封、防火）与基本 DFM 底线，违反即打回；</li>
         <li><span class="badge rec">推荐</span> 影响良率、成本与一致性，不满足需在评审中书面说明理由。</li>
       </ul>
+
       <h2>防腐位置分级（最重要的一条总则）</h2>
-      <p>包外件与包内件的防腐要求完全不同：<b>P1 包外裸露 ≥720h 盐雾，P3 包内 ≥240h，P4 包内干燥 ≥96h</b>。任何金属零件先定级、再选涂层，详细逻辑见「表面处理选型器」。</p>
-      <h2>变更管理工具</h2>
+      <p>包外件与包内件的防腐要求完全不同：<b>P1 包外裸露 ≥720h 盐雾，P2 遮蔽 ≥480h，P3 包内 ≥240h，P4 包内干燥 ≥96h</b>。任何金属零件先定级、再选涂层，详细逻辑见「表面处理选型器」。</p>
+
+      <h2>变更管理的两条铁律</h2>
       <ul>
-        <li><b>变更验证查字典</b>：勾选零件类别+变更类型（材料/工艺/表面处理/供应商/配方/场地等），自动生成零件级→装配级→Pack级验证清单、PPAP要求与十步流程，依据《变更验证管理办法 ML-GL-01》；配套 Excel：output/变更验证Checklist.xlsx。</li>
-        <li><b>技术要求生成器</b>：按物料大类（ML-TR-01~19）选择通用技术要求，勾选防腐位置后一键生成可复制的技术要求文本，粘贴进图纸技术要求栏，避免要求丢失。</li>
+        <li><b>设计冻结前</b>按临时变更走（有效期最长 7 天，须盖「临时文件」印章，未获顾客书面认可不得送货）；</li>
+        <li><b>C 类变更免验证</b>（仅限技术文件勘误、符号/标识不一致），S/A/B 类必须验证通过后放行；评审时限 <b>10 个工作日</b>。</li>
       </ul>
-      <h2>配套 Word 文档</h2>
-      <p>本网站全部内容同时输出为 Word 文档（格式与《电池系统紧固件选型规范_V1初版》一致），由设计部内部发放、打印与会签，不在本公开站点提供下载。</p>
+
+      <h2>配套 Word / Excel 文档</h2>
+      <ul>
+        <li>设计规范集（22 份）、通用技术要求（19 份）、变更管理执行手册等 Word 版本由设计部内部发放；</li>
+        <li>变更验证表：<b>变更验证Checklist.xlsx</b>（流程步骤 + 验证项策划 + 安全等级 + 判定矩阵四个表）。</li>
+      </ul>
+
       <h2>数据保护说明</h2>
-      <p>本页面全部规范数据在服务器端以 AES-256-GCM 密文存储，密钥由访问令牌经 PBKDF2-SHA256 派生，进入页面后仅在浏览器内存中解密使用；未经授权禁止抓取、复制或转存本页面内容。</p>
+      <p>本页面全部数据在服务器端以 AES-256-GCM 密文分片存储，密钥由访问令牌经 PBKDF2-SHA256 派生，进入页面后仅在浏览器内存中解密使用（规范全文按需加载）；未经授权禁止抓取、复制或转存本页面内容。</p>
     </div>
   `;
 }
